@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -69,9 +70,7 @@ export class InventoryService {
   `;
 
     if (updated !== 1) {
-      throw new BadRequestException(
-        'Insufficient stock or inventory not found',
-      );
+      throw new ConflictException('Insufficient stock or inventory not found');
     }
 
     await tx.inventoryReservation.create({
