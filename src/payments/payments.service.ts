@@ -185,15 +185,13 @@ export class PaymentsService {
         provider: 'SSLCOMMERZ',
         providerReference: input.tranId,
       },
-      include: {
-        order: true,
-      },
     });
 
     if (!payment) {
       throw new NotFoundException('Payment not found');
     }
 
+    // Never trust the IPN status alone.
     const validated = await this.paymentProvider.validateTransaction(
       input.valId,
     );
@@ -218,11 +216,184 @@ export class PaymentsService {
       throw new ConflictException('Payment currency mismatch');
     }
 
-    // Next: atomically deduplicate the event, update Payment and Order,
-    // and commit active inventory reservations in one DB transaction.
-    // Do not mark the order paid before that transaction succeeds.
+    // Stable identity for retries of the same IPN.
+    const providerEventId = `${input.tranId}:${input.valId}`;
 
-    return { verified: true };
+    try {
+      return await this.prisma.$transaction(
+        async (tx) => {
+          // Unique(provider, providerEventId) protects against concurrent and repeated delivery of the same event.
+          const event = await tx.paymentEvent.create({
+            data: {
+              provider: 'SSLCOMMERZ',
+              providerEventId,
+              paymentId: payment.id,
+              eventType: 'PAYMENT_VALIDATED',
+              status: 'RECEIVED',
+              payload: input.payload as Prisma.InputJsonValue,
+            },
+          });
+
+          const currentPayment = await tx.payment.findUnique({
+            where: { id: payment.id },
+          });
+
+          if (!currentPayment) {
+            throw new NotFoundException('Payment not found');
+          }
+
+          // A previously successful payment must never decrement inventory a second time.
+          if (currentPayment.status === 'SUCCEEDED') {
+            await tx.paymentEvent.update({
+              where: { id: event.id },
+              data: {
+                status: 'PROCESSED',
+                processedAt: new Date(),
+              },
+            });
+
+            return {
+              received: true,
+              alreadySucceeded: true,
+            };
+          }
+
+          if (!['PROCESSING', 'PENDING'].includes(currentPayment.status)) {
+            throw new ConflictException(
+              'Payment is not in a confirmable state',
+            );
+          }
+
+          // Only confirm an order that is still awaiting payment.
+          const orderUpdate = await tx.order.updateMany({
+            where: {
+              id: currentPayment.orderId,
+              status: 'PENDING_PAYMENT',
+            },
+            data: {
+              status: 'CONFIRMED',
+            },
+          });
+
+          if (orderUpdate.count !== 1) {
+            throw new ConflictException('Order is not awaiting payment');
+          }
+
+          // Fetch active reservations belonging to this order.
+          const reservations = await tx.inventoryReservation.findMany({
+            where: {
+              orderId: currentPayment.orderId,
+              status: 'ACTIVE',
+            },
+          });
+
+          if (reservations.length === 0) {
+            throw new ConflictException(
+              'No active inventory reservations found',
+            );
+          }
+
+          // Commit each reservation atomically. availableQuantity was already decremented during checkout.
+          for (const reservation of reservations) {
+            const inventoryUpdate = await tx.inventory.updateMany({
+              where: {
+                productId: reservation.productId,
+                reservedQuantity: {
+                  gte: reservation.quantity,
+                },
+              },
+              data: {
+                reservedQuantity: {
+                  decrement: reservation.quantity,
+                },
+              },
+            });
+
+            if (inventoryUpdate.count !== 1) {
+              throw new ConflictException(
+                'Inventory reservation could not be committed',
+              );
+            }
+
+            const reservationUpdate = await tx.inventoryReservation.updateMany({
+              where: {
+                id: reservation.id,
+                status: 'ACTIVE',
+              },
+              data: {
+                status: 'COMMITTED',
+              },
+            });
+
+            if (reservationUpdate.count !== 1) {
+              throw new ConflictException(
+                'Inventory reservation state changed unexpectedly',
+              );
+            }
+          }
+
+          // Mark the payment successful only within the same transaction.
+          const paymentUpdate = await tx.payment.updateMany({
+            where: {
+              id: currentPayment.id,
+              status: {
+                in: ['PROCESSING', 'PENDING'],
+              },
+            },
+            data: {
+              status: 'SUCCEEDED',
+            },
+          });
+
+          if (paymentUpdate.count !== 1) {
+            throw new ConflictException('Payment state changed unexpectedly');
+          }
+
+          await tx.paymentEvent.update({
+            where: { id: event.id },
+            data: {
+              status: 'PROCESSED',
+              processedAt: new Date(),
+            },
+          });
+
+          return {
+            received: true,
+            paymentId: currentPayment.id,
+            orderId: currentPayment.orderId,
+            paymentStatus: 'SUCCEEDED',
+            orderStatus: 'CONFIRMED',
+          };
+        },
+        {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        },
+      );
+    } catch (error) {
+      // If the unique event already exists, this delivery is a duplicate.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const existingEvent = await this.prisma.paymentEvent.findUnique({
+          where: {
+            provider_providerEventId: {
+              provider: 'SSLCOMMERZ',
+              providerEventId,
+            },
+          },
+        });
+
+        if (existingEvent?.status === 'PROCESSED') {
+          return {
+            received: true,
+            duplicate: true,
+          };
+        }
+      }
+
+      throw error;
+    }
   }
 
   private toResponse(payment: {
