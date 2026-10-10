@@ -14,8 +14,12 @@ export class SandboxPaymentProvider implements PaymentProvider {
       .digest('hex')
       .slice(0, 32);
 
+    const providerReference = `sandbox_${reference}`;
+
     return {
-      providerReference: `sandbox_${reference}`,
+      providerReference,
+      checkoutUrl: `https://sandbox.invalid/checkout/${providerReference}`,
+      sessionKey: providerReference,
     };
   }
 }
