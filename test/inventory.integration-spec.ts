@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
+
+import { randomUUID } from 'crypto';
 import { InventoryService } from '../src/inventory/inventory.service.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
 
