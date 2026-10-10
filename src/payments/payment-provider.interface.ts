@@ -12,6 +12,17 @@ export interface PaymentIntentResult {
   sessionKey: string;
 }
 
+export interface ValidatedTransaction {
+  status: string;
+  tran_id: string;
+  val_id: string;
+  amount: string;
+  currency?: string;
+  currency_type?: string;
+}
+
 export interface PaymentProvider {
   createIntent(input: CreatePaymentIntentInput): Promise<PaymentIntentResult>;
+
+  validateTransaction(valId: string): Promise<ValidatedTransaction>;
 }

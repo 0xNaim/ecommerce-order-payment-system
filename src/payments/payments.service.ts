@@ -175,6 +175,56 @@ export class PaymentsService {
     return this.toResponse(updatedPayment);
   }
 
+  async confirmPayment(input: {
+    tranId: string;
+    valId: string;
+    payload: Record<string, unknown>;
+  }) {
+    const payment = await this.prisma.payment.findFirst({
+      where: {
+        provider: 'SSLCOMMERZ',
+        providerReference: input.tranId,
+      },
+      include: {
+        order: true,
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException('Payment not found');
+    }
+
+    const validated = await this.paymentProvider.validateTransaction(
+      input.valId,
+    );
+
+    if (
+      !['VALID', 'VALIDATED'].includes(validated.status) ||
+      validated.tran_id !== payment.providerReference ||
+      validated.val_id !== input.valId
+    ) {
+      throw new ConflictException('Payment transaction could not be verified');
+    }
+
+    const validatedAmount = new Prisma.Decimal(validated.amount);
+
+    if (!validatedAmount.equals(payment.amount)) {
+      throw new ConflictException('Payment amount mismatch');
+    }
+
+    const validatedCurrency = validated.currency_type ?? validated.currency;
+
+    if (validatedCurrency !== payment.currency) {
+      throw new ConflictException('Payment currency mismatch');
+    }
+
+    // Next: atomically deduplicate the event, update Payment and Order,
+    // and commit active inventory reservations in one DB transaction.
+    // Do not mark the order paid before that transaction succeeds.
+
+    return { verified: true };
+  }
+
   private toResponse(payment: {
     id: string;
     status: string;

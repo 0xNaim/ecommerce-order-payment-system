@@ -1,5 +1,6 @@
 import {
   BadGatewayException,
+  BadRequestException,
   Injectable,
   InternalServerErrorException,
   ServiceUnavailableException,
@@ -9,6 +10,7 @@ import {
   CreatePaymentIntentInput,
   PaymentIntentResult,
   PaymentProvider,
+  ValidatedTransaction,
 } from '../payment-provider.interface.js';
 
 @Injectable()
@@ -127,5 +129,60 @@ export class SSLCommerzProvider implements PaymentProvider {
       checkoutUrl: result.GatewayPageURL,
       sessionKey: result.sessionkey,
     };
+  }
+
+  async validateTransaction(valId: string): Promise<ValidatedTransaction> {
+    const storeId = this.config.get<string>('SSLCOMMERZ_STORE_ID');
+    const storePassword = this.config.get<string>('SSLCOMMERZ_STORE_PASSWORD');
+    const baseUrl = this.config.get<string>('SSLCOMMERZ_BASE_URL');
+
+    if (!storeId || !storePassword || !baseUrl) {
+      throw new InternalServerErrorException(
+        'Payment provider configuration is incomplete',
+      );
+    }
+
+    if (!valId || valId.length > 50) {
+      throw new BadRequestException('Invalid validation ID');
+    }
+
+    const url = new URL('/validator/api/validationserverAPI.php', baseUrl);
+
+    url.searchParams.set('val_id', valId);
+    url.searchParams.set('store_id', storeId);
+    url.searchParams.set('store_passwd', storePassword);
+    url.searchParams.set('format', 'json');
+
+    let response: Response;
+
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      throw new ServiceUnavailableException(
+        'Unable to reach payment validation service',
+      );
+    }
+
+    if (!response.ok) {
+      throw new BadGatewayException(
+        'Payment validation service returned an error',
+      );
+    }
+
+    const result = await response.json();
+
+    if (
+      typeof result.status !== 'string' ||
+      typeof result.tran_id !== 'string' ||
+      typeof result.val_id !== 'string' ||
+      typeof result.amount !== 'string'
+    ) {
+      throw new BadGatewayException('Invalid payment validation response');
+    }
+
+    return result as ValidatedTransaction;
   }
 }

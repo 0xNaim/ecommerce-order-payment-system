@@ -3,6 +3,7 @@ import {
   CreatePaymentIntentInput,
   PaymentIntentResult,
   PaymentProvider,
+  ValidatedTransaction,
 } from './payment-provider.interface.js';
 
 export class SandboxPaymentProvider implements PaymentProvider {
@@ -21,5 +22,11 @@ export class SandboxPaymentProvider implements PaymentProvider {
       checkoutUrl: `https://sandbox.invalid/checkout/${providerReference}`,
       sessionKey: providerReference,
     };
+  }
+
+  async validateTransaction(_valId: string): Promise<ValidatedTransaction> {
+    throw new Error(
+      'Sandbox payment provider cannot validate transactions; use the SSLCommerz provider',
+    );
   }
 }
