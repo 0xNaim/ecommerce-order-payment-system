@@ -232,6 +232,12 @@ model OutboxEvent {
   publishedAt DateTime? @db.Timestamptz(3)
   createdAt   DateTime  @default(now()) @db.Timestamptz(3)
 
+  lockedAt      DateTime? @db.Timestamptz(3)
+  lockToken     String?   @db.Uuid
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime? @db.Timestamptz(3)
+  lastError     String?   @db.Text
+
   @@index([publishedAt, createdAt])
   @@index([aggregateType, aggregateId])
   @@map("outbox_events")

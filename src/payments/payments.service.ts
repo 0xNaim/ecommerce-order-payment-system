@@ -357,6 +357,24 @@ export class PaymentsService {
             },
           });
 
+          // Written in the same transaction so the event exists only if the confirmation commits.
+          await tx.outboxEvent.create({
+            data: {
+              eventType: 'order.confirmed',
+              aggregateType: 'ORDER',
+              aggregateId: currentPayment.orderId,
+              orderId: currentPayment.orderId,
+              payload: {
+                orderId: currentPayment.orderId,
+                paymentId: currentPayment.id,
+                paymentStatus: 'SUCCEEDED',
+                orderStatus: 'CONFIRMED',
+                amount: currentPayment.amount.toString(),
+                currency: currentPayment.currency,
+              },
+            },
+          });
+
           return {
             received: true,
             paymentId: currentPayment.id,
