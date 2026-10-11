@@ -21,8 +21,18 @@ export interface ValidatedTransaction {
   currency_type?: string;
 }
 
+export interface ProviderTransactionStatus {
+  status: string;
+  tran_id: string;
+  val_id?: string;
+  amount?: string;
+  currency_type?: string;
+}
+
 export interface PaymentProvider {
   createIntent(input: CreatePaymentIntentInput): Promise<PaymentIntentResult>;
 
   validateTransaction(valId: string): Promise<ValidatedTransaction>;
+
+  queryTransaction(tranId: string): Promise<ProviderTransactionStatus>;
 }

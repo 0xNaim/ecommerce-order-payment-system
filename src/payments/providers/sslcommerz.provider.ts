@@ -3,6 +3,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -10,6 +11,7 @@ import {
   CreatePaymentIntentInput,
   PaymentIntentResult,
   PaymentProvider,
+  ProviderTransactionStatus,
   ValidatedTransaction,
 } from '../payment-provider.interface.js';
 
@@ -184,5 +186,68 @@ export class SSLCommerzProvider implements PaymentProvider {
     }
 
     return result as ValidatedTransaction;
+  }
+
+  async queryTransaction(tranId: string): Promise<ProviderTransactionStatus> {
+    const storeId = this.config.get<string>('SSLCOMMERZ_STORE_ID');
+    const storePassword = this.config.get<string>('SSLCOMMERZ_STORE_PASSWORD');
+    const baseUrl = this.config.get<string>('SSLCOMMERZ_BASE_URL');
+
+    if (!storeId || !storePassword || !baseUrl) {
+      throw new InternalServerErrorException(
+        'Payment provider configuration is incomplete',
+      );
+    }
+
+    const url = new URL(
+      '/validator/api/merchantTransIDvalidationAPI.php',
+      baseUrl,
+    );
+
+    url.searchParams.set('tran_id', tranId);
+    url.searchParams.set('store_id', storeId);
+    url.searchParams.set('store_passwd', storePassword);
+    url.searchParams.set('format', 'json');
+
+    let response: Response;
+
+    try {
+      response = await fetch(url, {
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      throw new ServiceUnavailableException(
+        'Unable to query payment transaction',
+      );
+    }
+
+    if (!response.ok) {
+      throw new BadGatewayException('Payment status query failed');
+    }
+
+    const result = await response.json();
+
+    if (result.APIConnect !== 'DONE' || !Array.isArray(result.element)) {
+      throw new BadGatewayException('Invalid payment status query response');
+    }
+
+    const matching = result.element.find(
+      (item: Record<string, unknown>) => item.tran_id === tranId,
+    );
+
+    if (!matching || typeof matching.status !== 'string') {
+      throw new NotFoundException('Transaction status not found at provider');
+    }
+
+    return {
+      status: matching.status,
+      tran_id: String(matching.tran_id),
+      val_id: typeof matching.val_id === 'string' ? matching.val_id : undefined,
+      amount: typeof matching.amount === 'string' ? matching.amount : undefined,
+      currency_type:
+        typeof matching.currency_type === 'string'
+          ? matching.currency_type
+          : undefined,
+    };
   }
 }

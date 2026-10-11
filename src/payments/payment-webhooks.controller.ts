@@ -16,16 +16,38 @@ export class PaymentWebhooksController {
   @HttpCode(HttpStatus.OK)
   async handleSSLCommerzWebhook(@Body() body: Record<string, unknown>) {
     const tranId = typeof body.tran_id === 'string' ? body.tran_id : '';
-    const valId = typeof body.val_id === 'string' ? body.val_id : '';
+    const status = typeof body.status === 'string' ? body.status : '';
 
-    if (!tranId || !valId) {
-      throw new BadRequestException('Missing transaction or validation ID');
+    if (!tranId || !status) {
+      throw new BadRequestException('Missing transaction ID or status');
     }
 
-    return this.paymentsService.confirmPayment({
-      tranId,
-      valId,
-      payload: body,
-    });
+    if (status === 'VALID' || status === 'VALIDATED') {
+      const valId = typeof body.val_id === 'string' ? body.val_id : '';
+
+      if (!valId) {
+        throw new BadRequestException('Missing validation ID');
+      }
+
+      return this.paymentsService.confirmPayment({
+        tranId,
+        valId,
+        payload: body,
+      });
+    }
+
+    if (['FAILED', 'CANCELLED', 'EXPIRED', 'UNATTEMPTED'].includes(status)) {
+      return this.paymentsService.handleFailureNotification({
+        tranId,
+        ipnStatus: status,
+        payload: body,
+      });
+    }
+
+    // Unknown status: acknowledge receipt without changing money or stock.
+    return {
+      received: true,
+      pendingReconciliation: true,
+    };
   }
 }
