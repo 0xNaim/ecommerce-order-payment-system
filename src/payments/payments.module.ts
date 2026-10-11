@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AuthModule } from '../auth/auth.module.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
+import { PaymentReconciliationService } from './payment-reconciliation.service.js';
 import { PaymentWebhooksController } from './payment-webhooks.controller.js';
 import { PaymentsController } from './payments.controller.js';
 import { PaymentsService } from './payments.service.js';
@@ -14,6 +15,7 @@ export const PAYMENT_PROVIDER = 'PAYMENT_PROVIDER';
   providers: [
     PaymentsService,
     SSLCommerzProvider,
+    PaymentReconciliationService,
     {
       provide: PAYMENT_PROVIDER,
       useExisting: SSLCommerzProvider,
