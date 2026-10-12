@@ -9,6 +9,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { ProductsModule } from './products/products.module.js';
 import { OutboxModule } from './outbox/outbox.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
+import { MetricsModule } from './metrics/metrics.module.js';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { NotificationsModule } from './notifications/notifications.module.js';
     PaymentsModule,
     OutboxModule,
     NotificationsModule,
+    MetricsModule,
   ],
 })
 export class AppModule {}

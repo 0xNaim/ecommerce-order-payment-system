@@ -4,6 +4,7 @@ import { Cron } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import nodemailer, { Transporter } from 'nodemailer';
+import { MetricsService } from '../metrics/metrics.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 const BATCH_SIZE = 10;
@@ -38,6 +39,7 @@ export class NotificationWorkerService implements OnModuleDestroy {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly metrics: MetricsService,
     config: ConfigService,
   ) {
     const host = config.get<string>('SMTP_HOST');
@@ -59,6 +61,7 @@ export class NotificationWorkerService implements OnModuleDestroy {
       this.logger.warn(
         'SMTP is not configured. Notification jobs will remain pending.',
       );
+      this.metrics.setWorkerUp(false);
       return;
     }
 
@@ -75,6 +78,8 @@ export class NotificationWorkerService implements OnModuleDestroy {
       greetingTimeout: 10_000,
       socketTimeout: 20_000,
     });
+
+    this.metrics.setWorkerUp(Boolean(this.transporter && this.fromAddress));
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -168,6 +173,7 @@ export class NotificationWorkerService implements OnModuleDestroy {
   }
 
   private async deliver(job: ClaimedNotification): Promise<void> {
+    const startedAt = Date.now();
     let email: RenderedEmail;
 
     try {
@@ -189,9 +195,11 @@ export class NotificationWorkerService implements OnModuleDestroy {
         throw new Error('SMTP server did not accept the recipient');
       }
     } catch (error) {
-      await this.recordFailure(job, error);
+      await this.recordFailure(job, error, startedAt);
       return;
     }
+
+    this.metrics.recordDeliverySuccess((Date.now() - startedAt) / 1000);
 
     try {
       const result = await this.prisma.notification.updateMany({
@@ -232,10 +240,16 @@ export class NotificationWorkerService implements OnModuleDestroy {
   private async recordFailure(
     job: ClaimedNotification,
     error: unknown,
+    startedAt: number,
   ): Promise<void> {
-    const message = error instanceof Error ? error.message : String(error);
-
     const exhausted = job.attempts >= MAX_ATTEMPTS;
+
+    this.metrics.recordDeliveryFailure(
+      (Date.now() - startedAt) / 1000,
+      exhausted,
+    );
+
+    const message = error instanceof Error ? error.message : String(error);
 
     const delayMs = Math.min(
       INITIAL_RETRY_DELAY_MS * 2 ** (job.attempts - 1),
