@@ -33,6 +33,17 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum NotificationChannel {
+  EMAIL
+}
+
+enum NotificationStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
 enum ReservationStatus {
   ACTIVE
   COMMITTED
@@ -135,6 +146,25 @@ model OrderItem {
   @@map("order_items")
 }
 
+model InventoryReservation {
+  id        String            @id @default(uuid()) @db.Uuid
+  orderId   String            @db.Uuid
+  productId String            @db.Uuid
+  quantity  Int
+  status    ReservationStatus @default(ACTIVE)
+  expiresAt DateTime          @db.Timestamptz(3)
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([orderId, productId])
+  @@index([status, expiresAt])
+  @@map("inventory_reservations")
+}
+
 model Payment {
   id                String        @id @default(uuid()) @db.Uuid
   orderId           String        @db.Uuid
@@ -179,25 +209,6 @@ model PaymentEvent {
   @@unique([provider, providerEventId])
   @@index([status, createdAt])
   @@map("payment_events")
-}
-
-model InventoryReservation {
-  id        String            @id @default(uuid()) @db.Uuid
-  orderId   String            @db.Uuid
-  productId String            @db.Uuid
-  quantity  Int
-  status    ReservationStatus @default(ACTIVE)
-  expiresAt DateTime          @db.Timestamptz(3)
-
-  order   Order   @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
-
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt DateTime @updatedAt @db.Timestamptz(3)
-
-  @@unique([orderId, productId])
-  @@index([status, expiresAt])
-  @@map("inventory_reservations")
 }
 
 model IdempotencyRecord {
@@ -249,4 +260,31 @@ model ProcessedEvent {
   processedAt DateTime @default(now()) @db.Timestamptz(3)
 
   @@map("processed_events")
+}
+
+model Notification {
+  id      String              @id @default(uuid()) @db.Uuid
+  eventId String              @db.Uuid
+  channel NotificationChannel @default(EMAIL)
+  status  NotificationStatus  @default(PENDING)
+
+  recipientEmail String @db.VarChar(255)
+  template       String @db.VarChar(100)
+  subject        String @db.VarChar(255)
+  payload        Json
+
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now()) @db.Timestamptz(3)
+  lockedAt      DateTime? @db.Timestamptz(3)
+  lockToken     String?   @db.Uuid
+  sentAt        DateTime? @db.Timestamptz(3)
+  lastError     String?   @db.Text
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([eventId, channel])
+  @@index([status, nextAttemptAt])
+  @@index([status, lockedAt])
+  @@map("notifications")
 }

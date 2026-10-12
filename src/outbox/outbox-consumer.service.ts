@@ -190,24 +190,7 @@ export class OutboxConsumerService implements OnModuleInit, OnModuleDestroy {
     );
 
     try {
-      const existing = await this.prisma.processedEvent.findUnique({
-        where: { eventId: event.id },
-      });
-
-      if (existing) {
-        channel.ack(message);
-        return;
-      }
-
-      // Keep actual side effects out of this method for now.
-      // This is the event-acceptance step, not email delivery.
-      await this.handleDomainEvent(event);
-
-      // Unique(eventId) makes concurrent duplicate processing safe
-      // for this DB-only handler.
-      await this.prisma.processedEvent.create({
-        data: { eventId: event.id },
-      });
+      await this.persistEventAndNotification(event);
 
       channel.ack(message);
     } catch (error) {
@@ -272,21 +255,70 @@ export class OutboxConsumerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async handleDomainEvent(event: DomainEvent): Promise<void> {
-    switch (event.eventType) {
-      case 'order.created':
-      case 'order.confirmed':
-      case 'order.cancelled':
-      case 'order.expired':
-        this.logger.log(`Accepted ${event.eventType} for ${event.aggregateId}`);
-        return;
+  private async persistEventAndNotification(event: DomainEvent): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      // Unique eventId prevents duplicate processing.
+      // If anything below fails, this insert also rolls back.
+      await tx.processedEvent.create({
+        data: {
+          eventId: event.id,
+        },
+      });
 
-      default:
-        // Unknown events are visible but do not crash the worker.
-        this.logger.warn(
-          `No handler registered for event type ${event.eventType}`,
+      if (event.eventType !== 'order.confirmed') {
+        this.logger.log(
+          `Processed ${event.eventType} for ${event.aggregateId}`,
         );
-    }
+
+        return;
+      }
+
+      const order = await tx.order.findUnique({
+        where: {
+          id: event.aggregateId,
+        },
+        select: {
+          id: true,
+          orderNumber: true,
+          totalAmount: true,
+          currency: true,
+          user: {
+            select: {
+              email: true,
+            },
+          },
+        },
+      });
+
+      if (!order) {
+        throw new Error(
+          `Order not found for confirmation event: ${event.aggregateId}`,
+        );
+      }
+
+      await tx.notification.create({
+        data: {
+          eventId: event.id,
+          channel: 'EMAIL',
+          status: 'PENDING',
+
+          recipientEmail: order.user.email,
+          template: 'order-confirmed',
+          subject: `Order ${order.orderNumber} confirmed`,
+
+          payload: {
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            totalAmount: order.totalAmount.toString(),
+            currency: order.currency,
+          },
+        },
+      });
+
+      this.logger.log(
+        `Notification job created for order ${order.orderNumber}`,
+      );
+    });
   }
 
   private async publishAndConfirm(
