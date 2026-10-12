@@ -10,11 +10,7 @@ import { OutboxEvent } from '@prisma/client';
 import amqp, { ChannelModel, ConfirmChannel } from 'amqplib';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
-
-const EXCHANGE = 'ecommerce.events';
-const QUEUE = 'ecommerce.events';
-const BATCH_SIZE = 50;
-const MAX_ATTEMPTS = 20;
+import { assertOutboxTopology, OUTBOX_RABBITMQ } from './outbox.constants.js';
 
 @Injectable()
 export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
@@ -22,7 +18,10 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
 
   private connection?: ChannelModel;
   private channel?: ConfirmChannel;
+  private connecting = false;
   private running = false;
+
+  private readonly returnedMessageIds = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -30,60 +29,27 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.connect();
+    await this.ensureConnected();
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.channel?.close().catch(() => undefined);
-    await this.connection?.close().catch(() => undefined);
-  }
+    const channel = this.channel;
+    const connection = this.connection;
 
-  private async connect(): Promise<void> {
-    const url = this.config.get<string>('RABBITMQ_URL');
+    this.channel = undefined;
+    this.connection = undefined;
 
-    if (!url) {
-      throw new Error('RABBITMQ_URL is not configured');
-    }
-
-    this.connection = await amqp.connect(url);
-    this.channel = await this.connection.createConfirmChannel();
-
-    await this.channel.assertExchange(EXCHANGE, 'topic', {
-      durable: true,
-    });
-
-    // Ensure at least one durable queue receives every event.
-    const queue = await this.channel.assertQueue(QUEUE, { durable: true });
-
-    await this.channel.bindQueue(queue.queue, EXCHANGE, '#');
-
-    this.connection.on('error', (error) => {
-      this.logger.error('RabbitMQ connection error', error.message);
-    });
-
-    this.connection.on('close', () => {
-      this.logger.warn('RabbitMQ connection closed');
-      this.channel = undefined;
-      this.connection = undefined;
-      // A reconnect loop will be added in the reliability hardening phase.
-    });
+    await channel?.close().catch(() => undefined);
+    await connection?.close().catch(() => undefined);
   }
 
   @Cron('*/2 * * * * *')
   async publishPendingEvents(): Promise<void> {
     if (this.running) return;
 
-    if (!this.channel) {
-      try {
-        await this.connect();
-      } catch (error) {
-        this.logger.error(
-          'RabbitMQ is unavailable',
-          error instanceof Error ? error.message : String(error),
-        );
-        return;
-      }
-    }
+    await this.ensureConnected();
+
+    if (!this.channel) return;
 
     this.running = true;
 
@@ -103,6 +69,74 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async ensureConnected(): Promise<void> {
+    if (this.channel || this.connecting) return;
+
+    this.connecting = true;
+
+    try {
+      const url = this.config.get<string>('RABBITMQ_URL');
+
+      if (!url) {
+        throw new Error('RABBITMQ_URL is not configured');
+      }
+
+      const connection = await amqp.connect(url);
+
+      connection.on('error', (error) => {
+        this.logger.error(`RabbitMQ connection error: ${error.message}`);
+      });
+
+      connection.on('close', () => {
+        if (this.connection === connection) {
+          this.connection = undefined;
+          this.channel = undefined;
+        }
+
+        this.logger.warn('Publisher connection closed');
+      });
+
+      const channel = await connection.createConfirmChannel();
+
+      channel.on('error', (error) => {
+        this.logger.error(`Publisher channel error: ${error.message}`);
+      });
+
+      channel.on('close', () => {
+        if (this.channel === channel) {
+          this.channel = undefined;
+        }
+      });
+
+      channel.on('return', (message) => {
+        const messageId = message.properties.messageId;
+
+        if (messageId) {
+          this.returnedMessageIds.add(messageId);
+        }
+
+        this.logger.error(
+          `Unroutable outbox message: ${messageId ?? 'unknown'}`,
+        );
+      });
+
+      // Every publishing channel declares the same topology.
+      await assertOutboxTopology(channel);
+
+      this.connection = connection;
+      this.channel = channel;
+
+      this.logger.log('Outbox publisher connected to RabbitMQ');
+    } catch (error) {
+      this.logger.error(
+        'Outbox publisher connection failed',
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      this.connecting = false;
+    }
+  }
+
   private async claimBatch(): Promise<OutboxEvent[]> {
     const lockToken = randomUUID();
 
@@ -111,18 +145,21 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
         SELECT id
         FROM outbox_events
         WHERE "publishedAt" IS NULL
-          AND attempts < ${MAX_ATTEMPTS}
+          AND attempts < ${OUTBOX_RABBITMQ.MAX_PUBLISH_ATTEMPTS}
           AND (
             "nextAttemptAt" IS NULL
             OR "nextAttemptAt" <= NOW()
           )
           AND (
             "lockedAt" IS NULL
-            OR "lockedAt" < NOW() - INTERVAL '2 minutes'
+            OR "lockedAt" < NOW() - (
+              ${OUTBOX_RABBITMQ.LOCK_TIMEOUT_MINUTES}
+              * INTERVAL '1 minute'
+            )
           )
         ORDER BY "createdAt" ASC
         FOR UPDATE SKIP LOCKED
-        LIMIT ${BATCH_SIZE}
+        LIMIT ${OUTBOX_RABBITMQ.BATCH_SIZE}
       )
       UPDATE outbox_events AS e
       SET
@@ -139,12 +176,12 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     const channel = this.channel;
 
     if (!channel) {
-      await this.releaseForRetry(event, 'RabbitMQ channel unavailable');
+      await this.scheduleRetry(event, 'RabbitMQ channel unavailable');
       return;
     }
 
     try {
-      const payload = Buffer.from(
+      const content = Buffer.from(
         JSON.stringify({
           id: event.id,
           eventType: event.eventType,
@@ -157,9 +194,9 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
 
       await new Promise<void>((resolve, reject) => {
         channel.publish(
-          EXCHANGE,
+          OUTBOX_RABBITMQ.EXCHANGE,
           event.eventType,
-          payload,
+          content,
           {
             persistent: true,
             mandatory: true,
@@ -169,13 +206,23 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
             timestamp: Date.now(),
           },
           (error) => {
-            if (error) reject(error);
-            else resolve();
+            if (error) {
+              reject(error);
+              return;
+            }
+
+            // RabbitMQ emits "return" before the corresponding
+            // publisher confirm for an unroutable mandatory message.
+            if (this.returnedMessageIds.delete(event.id)) {
+              reject(new Error('RabbitMQ could not route the message'));
+              return;
+            }
+
+            resolve();
           },
         );
       });
 
-      // Update only if this worker still owns the claimed event.
       await this.prisma.outboxEvent.updateMany({
         where: {
           id: event.id,
@@ -193,18 +240,17 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
 
-      this.logger.error(`Outbox publish failed for ${event.id}: ${message}`);
+      this.logger.error(`Outbox event ${event.id} publish failed: ${message}`);
 
-      await this.releaseForRetry(event, message);
+      await this.scheduleRetry(event, message);
     }
   }
 
-  private async releaseForRetry(
+  private async scheduleRetry(
     event: OutboxEvent,
     errorMessage: string,
   ): Promise<void> {
-    // Exponential backoff, capped at 15 minutes.
-    const delaySeconds = Math.min(15 * 60, 2 ** Math.min(event.attempts, 10));
+    const seconds = Math.min(15 * 60, 2 ** Math.min(event.attempts, 10));
 
     await this.prisma.outboxEvent.updateMany({
       where: {
@@ -215,7 +261,7 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
       data: {
         lockedAt: null,
         lockToken: null,
-        nextAttemptAt: new Date(Date.now() + delaySeconds * 1000),
+        nextAttemptAt: new Date(Date.now() + seconds * 1000),
         lastError: errorMessage.slice(0, 2000),
       },
     });

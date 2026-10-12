@@ -242,3 +242,11 @@ model OutboxEvent {
   @@index([aggregateType, aggregateId])
   @@map("outbox_events")
 }
+
+model ProcessedEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  eventId     String   @unique @db.Uuid
+  processedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@map("processed_events")
+}
