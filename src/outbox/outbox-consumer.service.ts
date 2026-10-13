@@ -29,30 +29,82 @@ export class OutboxConsumerService implements OnModuleInit, OnModuleDestroy {
   private consumerTag?: string;
   private connecting = false;
 
+  private shuttingDown = false;
+  private readonly inFlight = new Set<Promise<void>>();
+  private reconnectPromise?: Promise<void>;
+  private reconnectAttempt = 0;
+  private readonly shutdownTimeoutMs = 25_000;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.ensureConsumer();
+    try {
+      await this.ensureConsumer();
+    } catch {
+      void this.startReconnectLoop();
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.shuttingDown) return;
+
+    this.shuttingDown = true;
+    this.logger.log('Graceful shutdown started');
+
     const channel = this.channel;
     const connection = this.connection;
     const consumerTag = this.consumerTag;
 
+    // Prevent any future reconnect attempts.
     this.channel = undefined;
     this.connection = undefined;
     this.consumerTag = undefined;
 
+    // Stop receiving new messages first.
     if (channel && consumerTag) {
-      await channel.cancel(consumerTag).catch(() => undefined);
+      await channel.cancel(consumerTag).catch((error: unknown) => {
+        this.logger.warn(
+          `Could not cancel consumer cleanly: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
     }
 
+    // Give currently executing handlers a bounded drain period.
+    const pending = Promise.allSettled([...this.inFlight]);
+
+    let timedOut = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      await Promise.race([
+        pending,
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, this.shutdownTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+
+    if (timedOut) {
+      this.logger.warn(
+        `Shutdown drain timed out; ${this.inFlight.size} handler(s) still running`,
+      );
+    }
+
+    // Closing the channel requeues any delivery that remains unacknowledged.
     await channel?.close().catch(() => undefined);
     await connection?.close().catch(() => undefined);
+
+    this.logger.log('RabbitMQ consumer shutdown completed');
   }
 
   @Cron('*/5 * * * * *')
@@ -60,6 +112,53 @@ export class OutboxConsumerService implements OnModuleInit, OnModuleDestroy {
     if (!this.channel || !this.consumerTag) {
       await this.ensureConsumer();
     }
+  }
+
+  private async startReconnectLoop(): Promise<void> {
+    if (this.shuttingDown || this.reconnectPromise) {
+      return;
+    }
+
+    this.reconnectPromise = (async () => {
+      while (!this.shuttingDown && (!this.channel || !this.consumerTag)) {
+        const baseDelay = Math.min(1_000 * 2 ** this.reconnectAttempt, 30_000);
+
+        const jitter = Math.floor(
+          Math.random() * Math.min(baseDelay * 0.25, 5_000),
+        );
+
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, baseDelay + jitter);
+        });
+
+        if (this.shuttingDown) return;
+
+        try {
+          await this.ensureConsumer();
+
+          if (this.channel && this.consumerTag) {
+            this.reconnectAttempt = 0;
+            this.logger.log('RabbitMQ consumer recovered');
+            return;
+          }
+        } catch (error) {
+          this.logger.error(
+            'Could not start RabbitMQ consumer',
+            error instanceof Error ? error.message : String(error),
+          );
+
+          throw error;
+        } finally {
+          this.connecting = false;
+        }
+
+        this.reconnectAttempt += 1;
+      }
+    })().finally(() => {
+      this.reconnectPromise = undefined;
+    });
+
+    await this.reconnectPromise;
   }
 
   private async ensureConsumer(): Promise<void> {
@@ -116,9 +215,24 @@ export class OutboxConsumerService implements OnModuleInit, OnModuleDestroy {
       const result = await channel.consume(
         OUTBOX_RABBITMQ.MAIN_QUEUE,
         (message) => {
-          if (message) {
-            void this.handleMessage(channel, message);
+          if (!message || this.shuttingDown) {
+            return;
           }
+
+          let task: Promise<void>;
+
+          task = this.handleMessage(channel, message)
+            .catch((error: unknown) => {
+              this.logger.error(
+                'Unexpected notification handler error',
+                error instanceof Error ? error.stack : String(error),
+              );
+            })
+            .finally(() => {
+              this.inFlight.delete(task);
+            });
+
+          this.inFlight.add(task);
         },
         { noAck: false },
       );
