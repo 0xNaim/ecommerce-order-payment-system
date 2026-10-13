@@ -1,124 +1,141 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# E-Commerce Order & Payment System
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A production-oriented backend project built with **NestJS, TypeScript, PostgreSQL, Prisma, RabbitMQ, and Docker**.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Features
 
-## Description
+- JWT authentication with Argon2id password hashing
+- Product APIs with pagination
+- Concurrency-safe inventory reservation
+- Idempotent checkout and order creation
+- SSLCommerz sandbox payment integration
+- Payment webhook/IPN handling
+- Transactional Outbox pattern
+- RabbitMQ messaging, retries, and dead-letter handling
+- Notification worker with retry and lease recovery
+- Health checks and structured request logging
+- Prometheus metrics and Grafana-compatible monitoring
+- Graceful shutdown and failure recovery
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Tech Stack
 
-## Project setup
+- **Backend:** Node.js, TypeScript, NestJS
+- **Database:** PostgreSQL, Prisma
+- **Messaging:** RabbitMQ
+- **Payments:** SSLCommerz Sandbox
+- **Authentication:** JWT, Argon2id
+- **Monitoring:** Prometheus, Grafana
+- **Infrastructure:** Docker, Docker Compose
 
-```bash
-$ npm install
+## Architecture
+
+```text
+Client
+  |
+  v
+NestJS API
+  |
+  +--> PostgreSQL
+  |      |
+  |      +--> Orders, Payments, Inventory
+  |      +--> Transactional Outbox
+  |      +--> Notification Jobs
+  |
+  +--> SSLCommerz Payment Gateway
+  |
+  +--> RabbitMQ --> Event Consumer
+
+Notification Worker --> SMTP
+Prometheus --> Grafana
 ```
 
-## Compile and run the project
+## Getting Started
+
+### Prerequisites
+
+- Node.js and npm
+- Docker and Docker Compose
+- PostgreSQL and RabbitMQ
+- SSLCommerz sandbox credentials for payment testing
+
+### 1. Clone the repository
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+git clone <YOUR_REPOSITORY_URL>
+cd <YOUR_PROJECT_DIRECTORY>
+npm install
 ```
 
-## Run tests
+### 2. Configure environment variables
+
+Create a local `.env` file using the environment variables required by the project.
+
+Configure the database, JWT secret, RabbitMQ, SSLCommerz, SMTP, and public webhook URL as applicable.
+
+**Never commit secrets or your `.env` file.**
+
+### 3. Start infrastructure
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+docker compose up -d
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### 4. Prepare the database
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npx prisma validate
+npx prisma generate
+npx prisma migrate deploy
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Observability
-
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
-
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-To add it to this project:
+### 5. Start the application
 
 ```bash
-$ npm install @nestjs/observe
+npm run start:dev
 ```
 
-Then follow the [setup guide](https://docs.nestjs.com/observability/overview) - it takes a single import and an app key.
+Check the health endpoints:
 
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
+```bash
+curl http://localhost:3000/health/live
+curl http://localhost:3000/health/ready
+```
 
-## Resources
+Adjust the port and commands to match your project configuration.
 
-Check out a few resources that may come in handy when working with NestJS:
+## Reliability & System Design
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+This project demonstrates practical backend engineering concepts:
 
-## Support
+- Atomic database operations to prevent inventory overselling
+- Idempotency to handle duplicate checkout requests
+- Transactional Outbox for reliable event publishing
+- Message acknowledgment, retries, and dead-letter handling
+- Payment webhook processing
+- Database-backed notification recovery
+- Health checks, metrics, and graceful shutdown
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+The system is designed to handle retries and duplicate events safely. Exactly-once delivery of external side effects, such as email, is not guaranteed.
 
-## Stay in touch
+## Testing
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+Run the scripts defined in `package.json`. Common commands include:
 
-## License
+```bash
+npm run build
+npm test
+```
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Important scenarios include concurrent checkout, idempotency conflicts, insufficient inventory, payment callbacks, RabbitMQ recovery, and notification retry behavior.
+
+## Security
+
+- Keep credentials in environment variables or a secret manager.
+- Verify payment notifications on the server.
+- Validate incoming requests and protect private endpoints.
+- Avoid logging sensitive data.
+- Use HTTPS for public endpoints.
+
+## Project Goal
+
+The goal of this project is to apply production-oriented backend engineering and system design principles, including reliability, concurrency, asynchronous processing, observability, and failure recovery.
