@@ -2,7 +2,6 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
 import nodemailer, { Transporter } from 'nodemailer';
 import { MetricsService } from '../metrics/metrics.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -12,6 +11,14 @@ const MAX_ATTEMPTS = 5;
 const LOCK_TIMEOUT_MINUTES = 2;
 const INITIAL_RETRY_DELAY_MS = 5_000;
 const MAX_RETRY_DELAY_MS = 15 * 60 * 1_000;
+
+
+class PermanentNotificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PermanentNotificationError';
+  }
+}
 
 interface ClaimedNotification {
   id: string;
@@ -113,8 +120,6 @@ export class NotificationWorkerService implements OnModuleDestroy {
   }
 
   private async claimBatch(): Promise<ClaimedNotification[]> {
-    const lockToken = randomUUID();
-
     // A worker that crashed on its final attempt must not retry forever.
     await this.prisma.$executeRaw`
       UPDATE notifications
@@ -138,37 +143,33 @@ export class NotificationWorkerService implements OnModuleDestroy {
         SELECT id
         FROM notifications
         WHERE
-          (
-            status = 'PENDING'
-            AND "nextAttemptAt" <= NOW()
+          "attempts" < 5
+          AND (
+            (
+              "status" = 'PENDING'
+              AND "nextAttemptAt" <= NOW()
+            )
+            OR (
+              "status" = 'PROCESSING'
+              AND "lockedAt" < NOW() - INTERVAL '2 minutes'
+            )
           )
-          OR
-          (
-            status = 'PROCESSING'
-            AND "lockedAt" < NOW() - INTERVAL '2 minutes'
-            AND attempts < ${MAX_ATTEMPTS}
-          )
-        ORDER BY "nextAttemptAt" ASC, "createdAt" ASC
+        ORDER BY
+          "nextAttemptAt" ASC,
+          "createdAt" ASC
+        LIMIT 10
         FOR UPDATE SKIP LOCKED
-        LIMIT ${BATCH_SIZE}
       )
       UPDATE notifications AS n
       SET
-        status = 'PROCESSING',
+        "status" = 'PROCESSING',
+        "attempts" = n."attempts" + 1,
         "lockedAt" = NOW(),
-        "lockToken" = ${lockToken}::uuid,
-        attempts = n.attempts + 1,
+        "lockToken" = gen_random_uuid(),
         "updatedAt" = NOW()
       FROM candidates AS c
-      WHERE n.id = c.id
-      RETURNING
-        n.id,
-        n."recipientEmail",
-        n.template,
-        n.subject,
-        n.payload,
-        n.attempts,
-        n."lockToken"::text AS "lockToken"
+      WHERE n."id" = c."id"
+      RETURNING n.*;
     `;
   }
 
@@ -242,11 +243,12 @@ export class NotificationWorkerService implements OnModuleDestroy {
     error: unknown,
     startedAt: number,
   ): Promise<void> {
-    const exhausted = job.attempts >= MAX_ATTEMPTS;
+    const retryable = this.isRetryableError(error);
+    const terminal = !retryable || job.attempts >= MAX_ATTEMPTS;
 
     this.metrics.recordDeliveryFailure(
       (Date.now() - startedAt) / 1000,
-      exhausted,
+      terminal,
     );
 
     const message = error instanceof Error ? error.message : String(error);
@@ -264,7 +266,7 @@ export class NotificationWorkerService implements OnModuleDestroy {
           lockToken: job.lockToken,
         },
         data: {
-          status: exhausted ? 'FAILED' : 'PENDING',
+          status: terminal ? 'FAILED' : 'PENDING',
           nextAttemptAt: new Date(Date.now() + delayMs),
           lockedAt: null,
           lockToken: null,
@@ -279,9 +281,9 @@ export class NotificationWorkerService implements OnModuleDestroy {
         return;
       }
 
-      if (exhausted) {
+      if (terminal) {
         this.logger.error(
-          `Notification ${job.id} exhausted ${MAX_ATTEMPTS} attempts: ${message}`,
+          `Notification ${job.id} failed permanently on attempt ${job.attempts}/${MAX_ATTEMPTS}: ${message}`,
         );
       } else {
         this.logger.warn(
@@ -296,9 +298,43 @@ export class NotificationWorkerService implements OnModuleDestroy {
     }
   }
 
+  private isRetryableError(error: unknown): boolean {
+    if (error instanceof PermanentNotificationError) {
+      return false;
+    }
+
+    if (typeof error !== 'object' || error === null) {
+      return true;
+    }
+
+    const details = error as { response?: unknown; responseCode?: unknown };
+
+    const responseCode = Number(details.responseCode);
+
+    if (responseCode >= 400 && responseCode < 500) {
+      return true;
+    }
+
+    if (responseCode >= 500 && responseCode < 600) {
+      return false;
+    }
+
+    const response =
+      typeof details.response === 'string' ? details.response : '';
+    const match = response.match(/\b([45]\d{2})\b/);
+
+    if (match) {
+      return Number(match[1]) < 500;
+    }
+
+    return true;
+  }
+
   private renderEmail(job: ClaimedNotification): RenderedEmail {
     if (job.template !== 'order-confirmed') {
-      throw new Error(`Unsupported email template: ${job.template}`);
+      throw new PermanentNotificationError(
+        `Unsupported email template: ${job.template}`,
+      );
     }
 
     const payload = job.payload;
@@ -308,7 +344,9 @@ export class NotificationWorkerService implements OnModuleDestroy {
       payload === null ||
       Array.isArray(payload)
     ) {
-      throw new Error('Invalid order-confirmation email payload');
+      throw new PermanentNotificationError(
+        'Invalid order-confirmation email payload',
+      );
     }
 
     const data = payload as Prisma.JsonObject;
@@ -317,7 +355,9 @@ export class NotificationWorkerService implements OnModuleDestroy {
     const currency = String(data.currency ?? '');
 
     if (!orderNumber || !totalAmount || !currency) {
-      throw new Error('Missing required order-confirmation fields');
+      throw new PermanentNotificationError(
+        'Missing required order-confirmation fields',
+      );
     }
 
     const safeOrderNumber = this.escapeHtml(orderNumber);
