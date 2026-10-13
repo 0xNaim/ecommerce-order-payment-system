@@ -7,10 +7,9 @@ export class MetricsController {
   constructor(private readonly metrics: MetricsService) {}
 
   @Get('metrics')
-  async getMetrics(@Res() response: Response): Promise<void> {
-    response
-      .status(200)
-      .type(this.metrics.registry.contentType)
-      .send(await this.metrics.registry.metrics());
+  async getMetrics(@Res() res: Response): Promise<void> {
+    res.setHeader('Content-Type', this.metrics.registry.contentType);
+
+    res.send(await this.metrics.registry.metrics());
   }
 }

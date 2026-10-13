@@ -27,6 +27,10 @@ export class MetricsService implements OnModuleInit {
   readonly notificationJobs: Gauge<'status'>;
   readonly workerUp: Gauge<string>;
 
+  readonly httpRequests: Counter<'method' | 'route' | 'status_code'>;
+  readonly httpDuration: Histogram<'method' | 'route' | 'status_code'>;
+  readonly requestsInFlight: Gauge<'method'>;
+
   constructor(private readonly prisma: PrismaService) {
     this.registry.setDefaultLabels({
       service: 'ecommerce-api',
@@ -55,6 +59,28 @@ export class MetricsService implements OnModuleInit {
       name: 'notification_jobs',
       help: 'Current notification jobs by database status.',
       labelNames: ['status'] as const,
+      registers: [this.registry],
+    });
+
+    this.httpRequests = new Counter({
+      name: 'ecommerce_http_requests_total',
+      help: 'Total HTTP requests processed.',
+      labelNames: ['method', 'route', 'status_code'] as const,
+      registers: [this.registry],
+    });
+
+    this.httpDuration = new Histogram({
+      name: 'ecommerce_http_request_duration_seconds',
+      help: 'HTTP request duration in seconds.',
+      labelNames: ['method', 'route', 'status_code'] as const,
+      buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+      registers: [this.registry],
+    });
+
+    this.requestsInFlight = new Gauge({
+      name: 'ecommerce_http_requests_in_flight',
+      help: 'Number of HTTP requests currently being processed.',
+      labelNames: ['method'] as const,
       registers: [this.registry],
     });
 
