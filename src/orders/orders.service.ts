@@ -5,6 +5,22 @@ import { InventoryService } from '../inventory/inventory.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
 
+export type OrderResponse = {
+  id: string;
+  orderNumber: string;
+  status: OrderStatus;
+  totalAmount: string;
+  currency: string;
+  items: {
+    productId: string;
+    productName: string;
+    quantity: number;
+    unitPrice: string;
+    lineTotal: string;
+  }[];
+  createdAt: string;
+};
+
 @Injectable()
 export class OrdersService {
   constructor(
@@ -43,7 +59,7 @@ export class OrdersService {
     userId: string,
     idempotencyKey: string,
     dto: CreateOrderDto,
-  ) {
+  ): Promise<OrderResponse> {
     if (
       !idempotencyKey ||
       idempotencyKey.length > 255 ||
@@ -165,7 +181,7 @@ export class OrdersService {
           },
         });
 
-        const response = {
+        const response: OrderResponse = {
           id: order.id,
           orderNumber: order.orderNumber,
           status: order.status,
@@ -229,7 +245,7 @@ export class OrdersService {
       responseBody: Prisma.JsonValue | null;
     },
     requestHash: string,
-  ) {
+  ): OrderResponse {
     if (record.requestHash !== requestHash) {
       throw new ConflictException(
         'Idempotency key was used with a different request',
@@ -240,6 +256,6 @@ export class OrdersService {
       throw new ConflictException('Request is still being processed');
     }
 
-    return record.responseBody;
+    return record.responseBody as unknown as OrderResponse;
   }
 }
